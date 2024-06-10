@@ -1359,7 +1359,7 @@
             "name": "Result",
             "value": {
               "minSupportedProtocolVersion": "1",
-              "maxSupportedProtocolVersion": "49",
+              "maxSupportedProtocolVersion": "50",
               "protocolVersion": "6",
               "featureFlags": {
                 "accept_zklogin_in_multisig": false,
@@ -1862,6 +1862,7 @@
                   "u64": "6000000"
                 },
                 "min_move_binary_format_version": null,
+                "minimal_threshold_for_bridge_committee": null,
                 "move_binary_format_version": {
                   "u32": "6"
                 },

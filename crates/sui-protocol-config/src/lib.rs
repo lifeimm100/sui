@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 /// The minimum and maximum protocol versions supported by this build.
 const MIN_PROTOCOL_VERSION: u64 = 1;
-const MAX_PROTOCOL_VERSION: u64 = 49;
+const MAX_PROTOCOL_VERSION: u64 = 50;
 
 // Record history of protocol version allocations here:
 //
@@ -138,6 +138,7 @@ const MAX_PROTOCOL_VERSION: u64 = 49;
 //             Enable VDF in devnet
 //             Enable consensus commit prologue V3 in devnet.
 //             Run Mysticeti consensus by default.
+// Version 50: Add bridge committee minimal stake power to the protocol config.
 
 #[derive(Copy, Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion(u64);
@@ -1121,6 +1122,9 @@ pub struct ProtocolConfig {
     /// The max number of consensus rounds a transaction can be deferred due to shared object congestion.
     /// Transactions will be cancelled after this many rounds.
     max_deferral_rounds_for_congestion_control: Option<u64>,
+
+    /// The minimal voting power threshold to form the bridge committee
+    minimal_threshold_for_bridge_committee: Option<u64>,
 }
 
 // feature flags
@@ -1848,6 +1852,8 @@ impl ProtocolConfig {
             max_accumulated_txn_cost_per_object_in_checkpoint: None,
 
             max_deferral_rounds_for_congestion_control: None,
+
+            minimal_threshold_for_bridge_committee: None,
             // When adding a new constant, set it to None in the earliest version, like this:
             // new_constant: None,
         };
@@ -2332,6 +2338,12 @@ impl ProtocolConfig {
 
                     // Run Move verification on framework upgrades in its own VM
                     cfg.feature_flags.fresh_vm_on_framework_upgrade = true;
+                }
+                50 => {
+                    // Prior to this, bridge committee on testnet was initialized formed
+                    // with 7500 voting power. Since this value is only used when
+                    // creating the committee, it's ok to not distinguish chains.
+                    cfg.minimal_threshold_for_bridge_committee = Some(9000);
                 }
                 // Use this template when making changes:
                 //

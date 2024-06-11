@@ -366,6 +366,11 @@ pub enum ToolCommand {
         /// and output will be reduced to necessary status information.
         #[clap(long = "verbose")]
         verbose: bool,
+
+        /// If true, download via skiplist for faster summary sync
+        /// and verification
+        #[clap(long = "with_skiplist")]
+        with_skiplist: bool,
     },
 
     #[clap(name = "replay")]
@@ -710,6 +715,7 @@ impl ToolCommand {
                 no_sign_request,
                 latest,
                 verbose,
+                with_skiplist,
             } => {
                 if !verbose {
                     tracing_handle
@@ -918,6 +924,7 @@ impl ToolCommand {
                     num_parallel_downloads,
                     network,
                     verify,
+                    with_skiplist,
                 )
                 .await?;
             }

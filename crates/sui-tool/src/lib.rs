@@ -645,6 +645,7 @@ fn start_summary_sync(
     epoch: u64,
     num_parallel_downloads: usize,
     verify: bool,
+    with_skiplist: bool,
 ) -> JoinHandle<Result<(), anyhow::Error>> {
     tokio::spawn(async move {
         info!("Starting summary sync");
@@ -712,19 +713,30 @@ fn start_summary_sync(
         });
 
         let sync_range = s_start..last_checkpoint + 1;
-        archive_reader
-            .read_summaries(
-                state_sync_store.clone(),
-                sync_range.clone(),
-                sync_checkpoint_counter,
-                // rather than blocking on verify, sync all summaries first, then verify later
-                false,
-            )
-            .await?;
+        if with_skiplist {
+            archive_reader
+                .read_summaries_with_skiplist(
+                    state_sync_store.clone(),
+                    sync_range.clone(),
+                    sync_checkpoint_counter,
+                )
+                .await?;
+        } else {
+            archive_reader
+                .read_summaries(
+                    state_sync_store.clone(),
+                    sync_range.clone(),
+                    sync_checkpoint_counter,
+                    // rather than blocking on verify, sync all summaries first, then verify later
+                    false,
+                )
+                .await?;
+        }
         sync_progress_bar.finish_with_message("Checkpoint summary sync is complete");
 
-        // verify checkpoint summaries
-        if verify {
+        // verify checkpoint summaries. Note that if with_skiplist is true, we verify
+        // the skiplist during summary read.
+        if verify && !with_skiplist {
             let v_start = s_start;
             // update highest verified to be highest synced. We will move back
             // iff parallel verification succeeds
@@ -844,6 +856,7 @@ pub async fn download_formal_snapshot(
     num_parallel_downloads: usize,
     network: Chain,
     verify: bool,
+    with_skiplist: bool,
 ) -> Result<(), anyhow::Error> {
     eprintln!(
         "Beginning formal snapshot restore to end of epoch {}, network: {:?}",
@@ -879,6 +892,7 @@ pub async fn download_formal_snapshot(
         epoch,
         num_parallel_downloads,
         verify,
+        with_skiplist,
     );
     let (_abort_handle, abort_registration) = AbortHandle::new_pair();
     let perpetual_db_clone = perpetual_db.clone();

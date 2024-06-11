@@ -11,6 +11,8 @@ use futures::{StreamExt, TryStreamExt};
 use prometheus::{register_int_counter_vec_with_registry, IntCounterVec, Registry};
 use rand::seq::SliceRandom;
 use std::borrow::Borrow;
+use std::cmp::max_by;
+use std::collections::HashMap;
 use std::future;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,8 +265,8 @@ impl ArchiveReader {
             .await
     }
 
-    /// Load checkpoints+txns+effects from archive into the input store `S` for the given
-    /// checkpoint range. Summaries are downloaded out of order and inserted without verification
+    /// Load checkpoints from archive into the input store `S` for the given checkpoint
+    /// range. Summaries are downloaded out of order and inserted without verification
     pub async fn read_summaries<S>(
         &self,
         store: S,
@@ -355,6 +357,140 @@ impl ArchiveReader {
                 })
                 .await
         }
+    }
+
+    /// Load given list of checkpoints from archive into the input store `S`.
+    /// Summaries are downloaded out of order and inserted without verification
+    pub async fn read_summaries_with_skiplist<S>(
+        &self,
+        store: S,
+        checkpoint_range: Range<CheckpointSequenceNumber>,
+        checkpoint_counter: Arc<AtomicU64>,
+    ) -> Result<()>
+    where
+        S: WriteStore + Clone,
+    {
+        let manifest = self.manifest.lock().await.clone();
+        let latest_available_checkpoint = manifest
+            .next_checkpoint_seq_num()
+            .checked_sub(1)
+            .context("Checkpoint seq num underflow")?;
+        let summary_files: Vec<FileMetadata> = self
+            .verify_manifest(manifest)
+            .await?
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect();
+
+        // because we don't know the skiplist a priori, start from the last
+        // checkpoint, and follow the skiplist chain back to genesis, verifying
+        // chain consistency along the way
+        let current_checkpoint = checkpoint_range.end;
+        // TODO(william) - figure out how to bootstrap the skiplist from the last checkpoint,
+        // i.e. figure out how we can trust the last checkpoint digest
+        let current_digest = None;
+        let mut end_checkpoint = None;
+        // we need this because the skiplist will generally not go all the way
+        // to genesis
+        let mut end_of_sliplist = false;
+
+        // Handle skiplist first.
+        // iterate over metadata files in the archive in reverse skiplist order
+        while !end_of_sliplist {
+            let file_index = match summary_files.binary_search_by(|s| {
+                let start = s.checkpoint_seq_range.start;
+                let end = s.checkpoint_seq_range.end;
+                if current_checkpoint >= start && current_checkpoint < end {
+                    std::cmp::Ordering::Equal
+                } else if current_checkpoint < start {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            }) {
+                Ok(index) => index,
+                Err(_) => panic!("Checkpoint {} not found in archive", current_checkpoint),
+            };
+            let current_file = &summary_files[file_index];
+            let current_file_data =
+                get(&self.remote_object_store, &current_file.file_path()).await?;
+            let checkpoints_in_file: HashMap<_, _> =
+                make_iterator::<CertifiedCheckpointSummary, Reader<Bytes>>(
+                    SUMMARY_FILE_MAGIC,
+                    current_file_data.reader(),
+                )?
+                .map(|summary| (summary.sequence_number, summary))
+                .collect();
+
+            // handle all checkpoints from the skiplist that are contained in the current file
+            loop {
+                let current_summary = checkpoints_in_file
+                    .get(&current_checkpoint)
+                    .expect("checkpoint not found in archive file");
+                if let Some(end_of_epoch_data) = current_summary.end_of_epoch_data.as_ref() {
+                    // TODO(william) get_or_insert_verified_checkpoint will fail since it checks
+                    // for the previous checkpoint. Need to update to check skiplist. We also
+                    // need a way to construct the skiplist with the assumption that it will
+                    // not go all the way to genesis, since we can't rewrite the already existing
+                    // chain state.
+                    let verified_checkpoint = Self::get_or_insert_skiplist_checkpoint(
+                        &store,
+                        current_summary.clone(),
+                        next_in_skiplist,
+                        true,
+                    )
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Checkpoint verification failed for checkpoint {}",
+                            current_checkpoint
+                        )
+                    });
+
+                    // update end checkpoint
+                    if let Some(end_checkpoint) = end_checkpoint {
+                        end_checkpoint = max_by(end_checkpoint, verified_checkpoint, |a, b| {
+                            a.sequence_number.cmp(&b.sequence_number)
+                        });
+                    } else {
+                        end_checkpoint = Some(verified_checkpoint);
+                    }
+                    let end = end_checkpoint.expect(
+                        "End checkpoint should be set by the time we've reached end of skiplist",
+                    );
+                    if verified_checkpoint.sequence_number == 0 {
+                        store
+                            .update_highest_verified_checkpoint(&end)
+                            .expect("Failed to update watermark");
+                        return Ok(());
+                    } else if let Some((prev_seq_num, prev_digest)) = verified_checkpoint
+                        .end_of_epoch_data
+                        .expect("Expected next checkpoint in skiplist to have end of epoch data")
+                        .prev_skip_list_checkpoint
+                    {
+                        current_checkpoint = prev_seq_num;
+                        current_digest = prev_digest;
+                    } else {
+                        end_of_sliplist = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Now we need to do a generic read from here using the new range
+        self.read_summaries(
+            store,
+            checkpoint_range.start..current_checkpoint,
+            checkpoint_counter,
+            verify,
+        )
+        .await?;
+        let end = end_checkpoint
+            .expect("End checkpoint should be set by the time we've reached end of skiplist");
+        store
+            .update_highest_verified_checkpoint(&end)
+            .expect("Failed to update watermark");
+        Ok(())
     }
 
     /// Load checkpoints+txns+effects from archive into the input store `S` for the given

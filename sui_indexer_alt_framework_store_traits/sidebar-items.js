@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["init_with_committer_watermark","pipeline_task"],"struct":["CommitterWatermark","InitWatermark","PrunerWatermark","ReaderWatermark"],"trait":["Connection","Store","TransactionalStore"]};
